@@ -1,202 +1,207 @@
 /**
  * Sistema de Monitoramento TOPADAS - Detecção de Posicionamento e Risco de Queda
  */
+// TODO BIBLIOTECAS
+  // ===== BIBLIOTECAS =====
+  #include <Arduino.h>
+  #include <HX711.h>
+  #include <Wire.h>
+  #include <LiquidCrystal_I2C.h>
+  #include "esp_pm.h"       // Para controle de energia
+  #include "esp_system.h"   // Para controle da frequência da CPU
 
-// ===== BIBLIOTECAS =====
-#include <Arduino.h>
-#include <HX711.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-#include "esp_pm.h"       // Para controle de energia
-#include "esp_system.h"   // Para controle da frequência da CPU
 
-// ! PARA CODIGO NA PCB (led vermelho 2 p/ 5 | botao  mod 5 p/ 2)
+// TODO Conexões GPIO
 
-#define FTDI_TX_PIN 23    // Pino TX do ESP32 para RX do FTDI
-#define FTDI_RX_PIN 18    // Pino RX do ESP32 para TX do FTDI
-#define LED_FTDI 19       // LED azul para indicar comunicação com FTDI
-#define BOTAO_PAUSA 0     // Pino para o botão de pausa (GPIO 0)
-#define BOTAO_INATIVO 15  // Botão para modo inativo (GPIO 15)
+  // ! PARA CODIGO NA PCB (led vermelho 2 p/ 5 | botao  mod 5 p/ 2)
+  // =====  FTDI  =====  
+  #define FTDI_TX_PIN 23    // Pino TX do ESP32 para RX do FTDI
+  #define FTDI_RX_PIN 18    // Pino RX do ESP32 para TX do FTDI
 
-// ===== DEFINIÇÕES DO PROTOCOLO =====
-#define FRAME_HEAD 0x55   // Byte de início do frame
-#define DELIMITER 0x5A    // Byte delimitador
-#define CMD_POSITION 0x1A // Comando para "mudou de posição"
-#define CMD_STATUS 0x1B   // Comando para "status do sistema" (ativo/pausado)
+  //=====  BOTOES  =====  
+  #define BOTAO_TARA 4      // Botão de tara (GPIO 4)
+  #define BOTAO_MODO 5      // Botão para alternar modo de exibição (GPIO 5)
+  #define BOTAO_PAUSA 0     // Pino para o botão de pausa (GPIO 0)
+  #define BOTAO_INATIVO 15  // Botão para modo inativo (GPIO 15)
 
-// ===== CÓDIGOS DE POSIÇÃO =====
-#define POS_PE_ESQUERDO 1
-#define POS_PE_DIREITO 2
-#define POS_CAB_DIREITA 3
-#define POS_CAB_ESQUERDA 4
+  // =====  LEDs =====   
+  #define LED_FTDI 19       // LED azul para indicar comunicação com FTDI
+  #define LED_ALERTA 2      // LED vermelho para alerta de risco de queda (GPIO 2)
+  #define LED_AMARELO 17    // LED amarelo - pisca quando sistema pausado (GPIO 17)
+  #define LED_VERDE 16      // LED verde - aceso quando sistema operando (GPIO 16)
 
-// ===== CÓDIGOS DE RISCO =====
-#define RISK_NO 0
-#define RISK_YES 1
+  // Sensores de Peso
+  // Sensor 1 - Pé esquerdo
+  #define pinDT  36    // Input only - S_VP / ADC1_0
+  #define pinSCK  32   // 32K_XP / TOUCH9
+  // Sensor 2 - Pé direito
+  #define pinDT2  39   // Input only - S_VN / ADC1_3
+  #define pinSCK2  33  // 32K_XN / TOUCH8
+  // Sensor 3 - Cabeceira direita
+  #define pinDT3  34   // Input only - VDET_1 / ADC1_6
+  #define pinSCK3  25  // DAC_1 / ADC1_8
+  // Sensor 4 - Cabeceira esquerda
+  #define pinDT4  35   // Input only - VDET_2 / ADC1_7
+  #define pinSCK4  26  // DAC_2 / ADC2_9
 
-// ===== MODOS DE DISPLAY =====
-#define DISPLAY_SENSORES_1_2 0
-#define DISPLAY_SENSORES_3_4 1
-#define DISPLAY_TOTAL 2
+  // Pinos I2C
+  #define SDA_PIN 21
+  #define SCL_PIN 22
 
-// ===== DEFINIÇÕES DE PINOS PARA ESP32 =====
-// Sensores de Peso
-// Sensor 1 - Pé esquerdo
-#define pinDT  36    // Input only - S_VP / ADC1_0
-#define pinSCK  32   // 32K_XP / TOUCH9
-// Sensor 2 - Pé direito
-#define pinDT2  39   // Input only - S_VN / ADC1_3
-#define pinSCK2  33  // 32K_XN / TOUCH8
-// Sensor 3 - Cabeceira direita
-#define pinDT3  34   // Input only - VDET_1 / ADC1_6
-#define pinSCK3  25  // DAC_1 / ADC1_8
-// Sensor 4 - Cabeceira esquerda
-#define pinDT4  35   // Input only - VDET_2 / ADC1_7
-#define pinSCK4  26  // DAC_2 / ADC2_9
+//TODO VARIÁVEIS CONSTANTES
+  // ===== DEFINIÇÕES FRAMES =====
+  #define FRAME_HEAD 0x55   // Byte de início do frame
+  #define DELIMITER 0x5A    // Byte delimitador
+  #define CMD_POSITION 0x1A // Comando para "mudou de posição"
+  #define CMD_STATUS 0x1B   // Comando para "status do sistema" (ativo/pausado)
 
-// Botões e LEDs
-#define BOTAO_TARA 4      // Botão de tara (GPIO 4)
-#define BOTAO_MODO 5      // Botão para alternar modo de exibição (GPIO 5)
-#define LED_ALERTA 2      // LED vermelho para alerta de risco de queda (GPIO 2)
-#define LED_AMARELO 17    // LED amarelo - pisca quando sistema pausado (GPIO 17)
-#define LED_VERDE 16      // LED verde - aceso quando sistema operando (GPIO 16)
+  // ===== CÓDIGOS DE RISCO =====
+  #define RISK_NO 0
+  #define RISK_YES 1
 
-// Pinos I2C
-#define SDA_PIN 21
-#define SCL_PIN 22
+  // ===== MODOS DE DISPLAY =====
+  #define DISPLAY_SENSORES_1_2 0
+  #define DISPLAY_SENSORES_3_4 1
+  #define DISPLAY_TOTAL 2
 
-// ===== PARÂMETROS DO LCD I2C =====
-#define LCD_ENDERECO 0x27  // Endereço I2C (normalmente 0x27 ou 0x3F)
-#define LCD_COLUNAS 16
-#define LCD_LINHAS 2
-#define LCD_BACKLIGHT_LEVEL 255  // Nível de backlight (0-255)
+  // ===== CÓDIGOS DE POSIÇÃO =====
+  #define POS_PE_ESQUERDO 1
+  #define POS_PE_DIREITO 2
+  #define POS_CAB_DIREITA 3
+  #define POS_CAB_ESQUERDA 4
 
-// ===== VARIÁVEIS DE CONTROLE =====
-#define ZONA_MORTA 0.1f         // Ignora variações de 100g
-#define NUM_LEITURAS 2          // Número de leituras para média móvel
-#define AMOSTRAS_HX711 2        // Número de amostras por leitura do sensor
-#define TAXA_ATUALIZACAO 150    // Tempo entre atualizações do display (ms)
-#define DEBOUNCE_DELAY 100      // Tempo de debounce para os botões (ms)
-#define MSG_DELAY 1500          // Tempo para mostrar mensagem de status (ms)
-#define LIMITE_PESO_MINIMO 0.05 // Peso mínimo para considerar ocupação
-#define LIMITE_BORDA 0.30       // Limite para considerar borda da cama
-#define I2C_FREQUENCIA 800000   // Frequência do barramento I2C (Hz)
-#define TEMPO_PISCA_LED 100     // Tempo em ms que o LED fica aceso após envio
+  // ===== PARÂMETROS DO LCD I2C =====
+  #define LCD_ENDERECO 0x27  // Endereço I2C (normalmente 0x27 ou 0x3F)
+  #define LCD_COLUNAS 16
+  #define LCD_LINHAS 2
+  #define LCD_BACKLIGHT_LEVEL 255  // Nível de backlight (0-255)
 
-// ===== CONFIGURAÇÕES DE TEMPO =====
-const unsigned long TEMPO_ALTERNANCIA_MODO_NORMAL = 4000;  // ms
-const unsigned long TEMPO_MOSTRAR_POSICAO = 1500;          // ms
-const unsigned long TEMPO_CICLO_QUADRANTES = 6000;         // ms
-const unsigned long TEMPO_PISCA_LED_AMARELO = 500;         // ms
+//TODO VARIÁVEIS DE CONTROLE
+  #define ZONA_MORTA 0.1f         // Ignora variações de 100g
+  #define NUM_LEITURAS 2          // Número de leituras para média móvel
+  #define AMOSTRAS_HX711 2        // Número de amostras por leitura do sensor
+  #define TAXA_ATUALIZACAO 150    // Tempo entre atualizações do display (ms)
+  #define DEBOUNCE_DELAY 100      // Tempo de debounce para os botões (ms)
+  #define MSG_DELAY 1500          // Tempo para mostrar mensagem de status (ms)
+  #define LIMITE_PESO_MINIMO 0.05 // Peso mínimo para considerar ocupação
+  #define LIMITE_BORDA 0.30       // Limite para considerar borda da cama
+  #define I2C_FREQUENCIA 800000   // Frequência do barramento I2C (Hz)
+  #define TEMPO_PISCA_LED 100     // Tempo em ms que o LED fica aceso após envio
 
-// ===== CONFIGURAÇÕES DE RISCO DE QUEDA =====
-int CONFIRMACOES_RISCO_QUEDA = 6;  // Confirmações necessárias para alerta
-const int MAX_CONFIRMACOES_RISCO = 10;  // Limite máximo de confirmações
-const int MIN_CONFIRMACOES_RISCO = 1;   // Limite mínimo de confirmações
+  // ===== CONFIGURAÇÕES DE TEMPO =====
+  const unsigned long TEMPO_ALTERNANCIA_MODO_NORMAL = 4000;  // ms
+  const unsigned long TEMPO_MOSTRAR_POSICAO = 1500;          // ms
+  const unsigned long TEMPO_CICLO_QUADRANTES = 6000;         // ms
+  const unsigned long TEMPO_PISCA_LED_AMARELO = 500;         // ms
 
-// ===== OBJETOS =====
-// Sensores de peso (células de carga)
-HX711 scale; 
-HX711 scale2; 
-HX711 scale3; 
-HX711 scale4;
+  // ===== CONFIGURAÇÕES DE RISCO DE QUEDA =====
+  int CONFIRMACOES_RISCO_QUEDA = 6;  // Confirmações necessárias para alerta
+  const int MAX_CONFIRMACOES_RISCO = 10;  // Limite máximo de confirmações
+  const int MIN_CONFIRMACOES_RISCO = 1;   // Limite mínimo de confirmações
 
-// LCD
-LiquidCrystal_I2C lcd(LCD_ENDERECO, LCD_COLUNAS, LCD_LINHAS);
+//  TODO OBJETOS =====
+  // Sensores de peso (células de carga)
+  HX711 scale; 
+  HX711 scale2; 
+  HX711 scale3; 
+  HX711 scale4;
 
-// ===== CARACTERES PERSONALIZADOS =====
-// Ícone de pessoa para o LCD
-byte icone_pessoa[8] = {
-  B01110, B01110, B00100, B01110, B10101, B00100, B01010, B01010
-};
+  // LCD
+  LiquidCrystal_I2C lcd(LCD_ENDERECO, LCD_COLUNAS, LCD_LINHAS);
 
-// Ícone de alerta para risco de queda
-byte icone_alerta[8] = {
-  B00100, B01110, B01110, B01110, B01110, B11111, B00100, B00100
-};
+//TODOS CARACTERES PERSONALIZADOS =====
+  // Ícone de pessoa para o LCD
+  byte icone_pessoa[8] = {
+    B01110, B01110, B00100, B01110, B10101, B00100, B01010, B01010
+  };
 
-// ===== VARIÁVEIS GLOBAIS =====
-// Medidas dos sensores
-float medida1 = 0;
-float medida2 = 0;
-float medida3 = 0;
-float medida4 = 0;
+  // Ícone de alerta para risco de queda
+  byte icone_alerta[8] = {
+    B00100, B01110, B01110, B01110, B01110, B11111, B00100, B00100
+  };
 
-// Controle do LCD
-bool lcd_encontrado = false;
-bool lcd_backlight_on = true;
-bool lcd_atualizado = false;
+//TODO VARIÁVEIS DE ESTADO=====
+  // Medidas dos sensores
+  float medida1 = 0;
+  float medida2 = 0;
+  float medida3 = 0;
+  float medida4 = 0;
 
-// Strings para o LCD
-char linha1[17];
-char linha2[17];
-char linha1_anterior[17] = {0};
-char linha2_anterior[17] = {0};
+  // Estado dos botões
+  bool estadoBotaoAnterior = HIGH;
+  bool estadoBotaoModoAnterior = HIGH;
+  bool estadoBotaoInativoAnterior = HIGH;
+  bool estado_anterior_botao_pausa = HIGH;
 
-// Temporizadores
-unsigned long ult_exibicao = 0;
-unsigned long ult_alternancia = 0;
-unsigned long ult_tempo_botao_tara = 0;
-unsigned long ult_tempo_botao_modo = 0;
-unsigned long ult_tempo_botao_inativo = 0;
-unsigned long ultimo_debounce_botao_pausa = 0;
-unsigned long ultimo_tempo_pisca_amarelo = 0;
-unsigned long msg_status_tempo = 0;
-unsigned long tempo_led_ftdi = 0;
+  // Modo de operação
+  int modo_operacao = 0;  // 0: Normal, 1: Quadrantes, 2: Risco de Queda
+  int modo_display = DISPLAY_SENSORES_1_2;
 
-// Estado dos botões
-bool estadoBotaoAnterior = HIGH;
-bool estadoBotaoModoAnterior = HIGH;
-bool estadoBotaoInativoAnterior = HIGH;
-bool estado_anterior_botao_pausa = HIGH;
+  // Variáveis de status
+  bool mostrando_status = false;
+  bool risco_queda = false;
+  bool led_ftdi_ativo = false;
+  bool estado_led_amarelo = false;
+  bool sistema_monitorando = true;
+  bool sistema_ativo = true;
 
-// Modo de operação
-int modo_operacao = 0;  // 0: Normal, 1: Quadrantes, 2: Risco de Queda
-int modo_display = DISPLAY_SENSORES_1_2;
+  // Variáveis de risco
+  int condicao_risco = 0;
+  int condicao_risco_atual = 0;
+  int contagem_confirmacao_risco = 0;
+  int ultimo_risco_detectado = 0;
+  int ultima_condicao = 0;
 
-// Variáveis de status
-bool mostrando_status = false;
-bool risco_queda = false;
-bool led_ftdi_ativo = false;
-bool estado_led_amarelo = false;
-bool sistema_monitorando = true;
-bool sistema_ativo = true;
+  // Variáveis para posição
+  float porc_quad1 = 0, porc_quad2 = 0, porc_quad3 = 0, porc_quad4 = 0;
+  String posicao_atual = "Indefinida";
+  String posicao_anterior = "Indefinida";
 
-// Variáveis de risco
-int condicao_risco = 0;
-int condicao_risco_atual = 0;
-int contagem_confirmacao_risco = 0;
-int ultimo_risco_detectado = 0;
-int ultima_condicao = 0;
+  // Variáveis para média móvel - Sensor 1
+  float leituras1[NUM_LEITURAS];
+  int indice_leitura1 = 0;
+  float total_leituras1 = 0;
+  bool array_inicializado1 = false;
 
-// Variáveis para posição
-float porc_quad1 = 0, porc_quad2 = 0, porc_quad3 = 0, porc_quad4 = 0;
-String posicao_atual = "Indefinida";
-String posicao_anterior = "Indefinida";
+  // Variáveis para média móvel - Sensor 2
+  float leituras2[NUM_LEITURAS];
+  int indice_leitura2 = 0;
+  float total_leituras2 = 0;
+  bool array_inicializado2 = false;
 
-// Variáveis para média móvel - Sensor 1
-float leituras1[NUM_LEITURAS];
-int indice_leitura1 = 0;
-float total_leituras1 = 0;
-bool array_inicializado1 = false;
+  // Variáveis para média móvel - Sensor 3
+  float leituras3[NUM_LEITURAS];
+  int indice_leitura3 = 0;
+  float total_leituras3 = 0;
+  bool array_inicializado3 = false;
 
-// Variáveis para média móvel - Sensor 2
-float leituras2[NUM_LEITURAS];
-int indice_leitura2 = 0;
-float total_leituras2 = 0;
-bool array_inicializado2 = false;
+  // Variáveis para média móvel - Sensor 4
+  float leituras4[NUM_LEITURAS];
+  int indice_leitura4 = 0;
+  float total_leituras4 = 0;
+  bool array_inicializado4 = false;
+  
+  // Controle do LCD
+  bool lcd_encontrado = false;
+  bool lcd_backlight_on = true;
+  bool lcd_atualizado = false;
 
-// Variáveis para média móvel - Sensor 3
-float leituras3[NUM_LEITURAS];
-int indice_leitura3 = 0;
-float total_leituras3 = 0;
-bool array_inicializado3 = false;
+  // Strings para o LCD
+  char linha1[17];
+  char linha2[17];
+  char linha1_anterior[17] = {0};
+  char linha2_anterior[17] = {0};
 
-// Variáveis para média móvel - Sensor 4
-float leituras4[NUM_LEITURAS];
-int indice_leitura4 = 0;
-float total_leituras4 = 0;
-bool array_inicializado4 = false;
+  // Temporizadores
+  unsigned long ult_exibicao = 0;
+  unsigned long ult_alternancia = 0;
+  unsigned long ult_tempo_botao_tara = 0;
+  unsigned long ult_tempo_botao_modo = 0;
+  unsigned long ult_tempo_botao_inativo = 0;
+  unsigned long ultimo_debounce_botao_pausa = 0;
+  unsigned long ultimo_tempo_pisca_amarelo = 0;
+  unsigned long msg_status_tempo = 0;
+  unsigned long tempo_led_ftdi = 0;
 
 // ===== PROTÓTIPOS DE FUNÇÕES =====
 void garantir_backlight();
