@@ -50,10 +50,16 @@
 
 //TODO VARIÁVEIS CONSTANTES
   // ===== DEFINIÇÕES FRAMES =====
-  #define FRAME_HEAD 0x55   // Byte de início do frame
-  #define DELIMITER 0x5A    // Byte delimitador
-  #define CMD_POSITION 0x1A // Comando para "mudou de posição"
-  #define CMD_STATUS 0x1B   // Comando para "status do sistema" (ativo/pausado)
+  // Frames de envio (ESP32 -> Raspberry)
+  #define FRAME_HEAD_TX 0x55   // Byte de início do frame de transmissão
+  #define DELIMITER_TX 0x5A    // Byte delimitador de transmissão
+  #define CMD_POSITION 0x1A    // Comando para "mudou de posição"
+  #define CMD_STATUS 0x1B      // Comando para "status do sistema" (ativo/pausado)
+  
+  // Frames de recepção (Raspberry -> ESP32)
+  #define FRAME_HEAD_RX 0x5A   // Byte de início do frame de recepção
+  #define DELIMITER_RX 0x55    // Byte delimitador de recepção
+  #define CMD_RISK_FACTOR 0x1C // Comando para fator de risco do paciente
 
   // ===== CÓDIGOS DE RISCO =====
   #define RISK_NO 0
@@ -87,6 +93,7 @@
   #define LIMITE_BORDA 0.30       // Limite para considerar borda da cama
   #define I2C_FREQUENCIA 800000   // Frequência do barramento I2C (Hz)
   #define TEMPO_PISCA_LED 100     // Tempo em ms que o LED fica aceso após envio
+  #define UART_RX_TIMEOUT 100     // Tempo de timeout para recepção UART (ms)
 
   // ===== CONFIGURAÇÕES DE TEMPO =====
   const unsigned long TEMPO_ALTERNANCIA_MODO_NORMAL = 4000;  // ms
@@ -203,6 +210,12 @@
   unsigned long msg_status_tempo = 0;
   unsigned long tempo_led_ftdi = 0;
 
+  // Variáveis para recepção UART
+  bool fator_risco_habilitado = true;  // Por padrão, sistema funciona normalmente
+  uint8_t uart_rx_buffer[5];           // Buffer para receber frames
+  uint8_t uart_rx_index = 0;           // Índice atual no buffer
+  unsigned long ultimo_byte_recebido = 0; // Timeout para recepção
+
 // TODO FUNÇÕES =====
   void garantir_backlight();
   void copiar_para_buffer(const char* texto, char* buffer);
@@ -224,6 +237,7 @@
   void processar_botao_tara(unsigned long tempo_atual);
   void processar_botao_modo(unsigned long tempo_atual);
   void atualizar_leds_status();
+  void processar_uart_rx();
   void setup();
   void loop();
 
@@ -454,6 +468,11 @@ void float_para_string(float valor, char* buffer) {
       return;
     }
     
+    // Se o fator de risco estiver desabilitado, não envia dados de posição
+    if (!fator_risco_habilitado) {
+      return;
+    }
+    
     byte codigo_posicao = 0;
     byte codigo_risco = 0; // Quando só envia posição, risco é 0
     
@@ -472,8 +491,8 @@ void float_para_string(float valor, char* buffer) {
     }
     
     // Envia o frame completo com dois bytes de dados
-    Serial2.write(FRAME_HEAD);   // 0x55
-    Serial2.write(DELIMITER);    // 0x5A
+    Serial2.write(FRAME_HEAD_TX);   // 0x55
+    Serial2.write(DELIMITER_TX);    // 0x5A
     Serial2.write(CMD_POSITION); // 0x1A (mudou de posição)
     Serial2.write(codigo_posicao); // 1, 2, 3 ou 4
     Serial2.write(codigo_risco);   // 0 (sem risco)
@@ -489,6 +508,11 @@ void float_para_string(float valor, char* buffer) {
   void enviar_risco_ftdi(String posicao, bool tem_risco) {
     // Se o sistema estiver pausado ou inativo, não envia nada
     if (!sistema_monitorando || !sistema_ativo) {
+      return;
+    }
+    
+    // Se o fator de risco estiver desabilitado, não envia alertas de risco
+    if (!fator_risco_habilitado) {
       return;
     }
     
@@ -510,8 +534,8 @@ void float_para_string(float valor, char* buffer) {
     }
     
     // Envia o frame completo com dois bytes de dados
-    Serial2.write(FRAME_HEAD);   // 0x55
-    Serial2.write(DELIMITER);    // 0x5A
+    Serial2.write(FRAME_HEAD_TX);   // 0x55
+    Serial2.write(DELIMITER_TX);    // 0x5A
     Serial2.write(CMD_POSITION); // 0x1A (mudou de posição)  
     Serial2.write(codigo_posicao); // 0-4 (posição)
     Serial2.write(codigo_risco);   // 0 ou 1 (sem/com risco)
@@ -531,8 +555,8 @@ void float_para_string(float valor, char* buffer) {
     byte dt2 = (!sistema_ativo || !sistema_monitorando) ? 0x01 : 0x00;
     
     // Envia o frame completo
-    Serial2.write(FRAME_HEAD);  // 0x55
-    Serial2.write(DELIMITER);   // 0x5A
+    Serial2.write(FRAME_HEAD_TX);  // 0x55
+    Serial2.write(DELIMITER_TX);   // 0x5A
     Serial2.write(CMD_STATUS);  // 0x1B (status do sistema)
     Serial2.write(dt1);         // 0x01=ativo, 0x00=inativo
     Serial2.write(dt2);         // 0x00=monitorando, 0x01=pausado/inativo
@@ -808,6 +832,90 @@ void float_para_string(float valor, char* buffer) {
     estadoBotaoModoAnterior = estadoBotaoAtual;
   }
 
+/**
+ * Processa dados recebidos via UART para configurar o fator de risco
+ */
+void processar_uart_rx() {
+  // Verifica se há dados disponíveis no Serial2
+  while (Serial2.available() > 0) {
+    uint8_t byte_recebido = Serial2.read();
+    ultimo_byte_recebido = millis(); // Atualiza timestamp
+    
+    // Se estamos esperando o início do frame
+    if (uart_rx_index == 0) {
+      if (byte_recebido == FRAME_HEAD_RX) { // 0x5A
+        uart_rx_buffer[uart_rx_index++] = byte_recebido;
+      }
+    }
+    // Se já temos o framehead, esperamos o delimitador
+    else if (uart_rx_index == 1) {
+      if (byte_recebido == DELIMITER_RX) { // 0x55
+        uart_rx_buffer[uart_rx_index++] = byte_recebido;
+      } else {
+        // Frame inválido, reinicia
+        uart_rx_index = 0;
+      }
+    }
+    // Esperamos o comando
+    else if (uart_rx_index == 2) {
+      if (byte_recebido == CMD_RISK_FACTOR) { // 0x1C
+        uart_rx_buffer[uart_rx_index++] = byte_recebido;
+      } else {
+        // Comando desconhecido, reinicia
+        uart_rx_index = 0;
+      }
+    }
+    // Esperamos o byte de dados (fator de risco)
+    else if (uart_rx_index == 3) {
+      uart_rx_buffer[uart_rx_index++] = byte_recebido;
+      
+      // Frame completo recebido, processa o comando
+      if (uart_rx_buffer[2] == CMD_RISK_FACTOR) {
+        bool novo_fator_risco = (uart_rx_buffer[3] == 0x01);
+        
+        // Se o fator de risco mudou, atualiza o sistema
+        if (novo_fator_risco != fator_risco_habilitado) {
+          fator_risco_habilitado = novo_fator_risco;
+          
+          // Log da mudança
+          Serial.print("Fator de risco do paciente alterado para: ");
+          if (fator_risco_habilitado) {
+            Serial.println("HABILITADO (alertas de risco ativos)");
+          } else {
+            Serial.println("DESABILITADO (sem alertas de risco)");
+            // Se desabilitar o fator de risco, desliga o LED de alerta se estiver aceso
+            digitalWrite(LED_ALERTA, LOW);
+            risco_queda = false;
+            contagem_confirmacao_risco = 0;
+          }
+          
+          // Feedback no LCD
+          if (lcd_encontrado) {
+            if (fator_risco_habilitado) {
+              copiar_para_buffer("FATOR RISCO: ON", linha1);
+              copiar_para_buffer("Alertas ativos", linha2);
+            } else {
+              copiar_para_buffer("FATOR RISCO: OFF", linha1);
+              copiar_para_buffer("Sem alertas", linha2);
+            }
+            atualizar_lcd(linha1, linha2);
+            msg_status_tempo = millis();
+            mostrando_status = true;
+          }
+        }
+      }
+      
+      // Reinicia o buffer para próxima recepção
+      uart_rx_index = 0;
+    }
+  }
+  
+  // Timeout: se passou muito tempo desde o último byte, reinicia o buffer
+  if (uart_rx_index > 0 && (millis() - ultimo_byte_recebido > UART_RX_TIMEOUT)) {
+    uart_rx_index = 0;
+  }
+}
+
 // TODO SETUP Inicialização do sistema
 
   void setup() {
@@ -899,6 +1007,7 @@ void float_para_string(float valor, char* buffer) {
     Serial.println("Calibração concluída");
     Serial.println("Sistema pronto para uso");
     Serial.println("Sistema em modo MONITORANDO - LED verde aceso quando ativo, LED amarelo pisca quando pausado");
+    Serial.println("Fator de risco do paciente: HABILITADO (padrão) - Aguardando comandos via UART");
     
     if (lcd_encontrado) {
       garantir_backlight();
@@ -934,6 +1043,9 @@ void float_para_string(float valor, char* buffer) {
  
   void loop() {
     unsigned long tempo_atual = millis();
+    
+    // Processa dados recebidos via UART (fator de risco)
+    processar_uart_rx();
     
     // Controle do LED do FTDI - desliga após o tempo definido
     if (led_ftdi_ativo && (tempo_atual - tempo_led_ftdi > TEMPO_PISCA_LED)) {
@@ -978,6 +1090,10 @@ void float_para_string(float valor, char* buffer) {
     processar_botao_pausa();
     
     // Verifica se há dados disponíveis no Serial para ajuste de confirmações
+    // Comandos disponíveis:
+    // r+ : aumenta o número de confirmações necessárias para detectar risco
+    // r- : diminui o número de confirmações necessárias
+    // r=X : define um valor específico (ex: r=5)
     if (Serial.available() > 0) {
       String comando = Serial.readStringUntil('\n');
       comando.trim();
@@ -1108,7 +1224,8 @@ void float_para_string(float valor, char* buffer) {
         }
         
         // Controla o LED de alerta
-        digitalWrite(LED_ALERTA, risco_queda ? HIGH : LOW);
+        // Só acende o LED se o fator de risco estiver habilitado
+        digitalWrite(LED_ALERTA, (risco_queda && fator_risco_habilitado) ? HIGH : LOW);
         
         // Prepara dados para o LCD
         if (lcd_encontrado && !mostrando_status) {
@@ -1137,6 +1254,8 @@ void float_para_string(float valor, char* buffer) {
               case DISPLAY_TOTAL:
                 if (!sistema_monitorando) {
                   sprintf(linha1, "PAUSADO");
+                } else if (!fator_risco_habilitado) {
+                  sprintf(linha1, "SEM ALERTAS");
                 } else {
                   sprintf(linha1, "Peso: %s kg", total_str);
                 }
