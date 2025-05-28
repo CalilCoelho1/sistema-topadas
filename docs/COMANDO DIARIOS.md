@@ -1,6 +1,12 @@
 git config --global user.name "CalilCoelho1"
 git config --global user.email "calilcoelho1@gmail.com"
 
+# add new branch
+git checkout -b teste
+
+# use branch
+git checkout teste
+
 # Ver status dos arquivos
 git status
 
